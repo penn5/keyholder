@@ -58,6 +58,26 @@ void clearBuffer() { // Clean the read buffer, so that future calls to readChars
     Serial.read(); // Cleanup read buffer
 }
 
+void restart() {
+  // This function never returns
+  Serial.println("AT+EXIT");
+  delay(100);
+  Serial.println("Restarting, goodbye!");
+  delay(200);
+  Serial.print("+++"); // Enter AT mode
+  delay(800);
+  Serial.println("AT+RESTART"); // Request the Bluetooth controller to restart the AP (application processor)
+  Serial.println("AT+EXIT"); // Exit AT mode
+  delay(10000); // Wait for us to die
+  Serial.println("We weren't killed by the BLE chip, something bad happened");
+  while (1) { // error condition, flash forever
+    digitalWrite(13, HIGH);
+    delay(100);
+    digitalWrite(13, LOW);
+    delay(100);
+  }
+}
+
 void loop() {
   // This function is called in a loop, forever as long as the chip is powered
   if (didUserPressFactoryResetButton) {
@@ -69,19 +89,7 @@ void loop() {
       EEPROM.write(i, 0); // Clear that byte of EEPROM
     }
     Serial.println("EEPROM erased."); // Send debug message
-    delay(200);
-    Serial.print("+++"); // Enter AT mode
-    delay(800);
-    Serial.println("AT+RESTART"); // Request the Bluetooth controller to restart the AP (application processor)
-    Serial.println("AT+EXIT"); // Exit AT mode
-    delay(10000); // Wait for us to die
-    Serial.println("We weren't killed by the BLE chip, something bad happened");
-    while (1) { // error condition, flash forever
-      digitalWrite(13, HIGH);
-      delay(100);
-      digitalWrite(13, LOW);
-      delay(100);
-    }
+    restart();
   }
   state_t laststate = state; // Save the current state so we can know if it has changed
   // The next section calls into the function based on which state we are in
@@ -108,9 +116,9 @@ void loop() {
       at_pending_exit();
       break;
   }
-  delay(100);
+//  delay(500);
   if (state == laststate) { // If the state didn't change, wait 1/5th of a second to give the chip some rest, otherwise 1/10th
-    delay(100);
+    delay(10);
   }
 }
 
@@ -149,10 +157,7 @@ void in_at() {
     readChars(0, "OK", 100);
     EEPROM.write(0, SETUP_MAGICNUM); // Store the fact that we have programmed the device name, as the name is not stored or used unless RESTART is sent
     delay(1000); // Wait a while, to give time for settings to be saved
-    Serial.println("AT+RESTART"); // Restart AP
-    Serial.println("AT+EXIT"); // Exit AT mode
-    delay(10000); // Wait for us to be killed
-    Serial.println("We were not restarted by the BLE controller. Something is wrong"); // Send the error to debug port
+    return;
   }
   state = WAITING_CONNECT; // We are ready for a device to connect
 }
@@ -198,7 +203,6 @@ void device_connected() {
   byte i; // Temporary variable to represent a counter
   byte j; // Temporary variable to represent a counter
   if (Serial.available() > 3) { // If there are at least 4 characters available to read from Serial...
-    lastTime = millis(); // Set the last communication time
     for (i = 0; i < 4; i++) { // For i = 0 to 3
       // Read the device UID from Serial
       tmp = Serial.read(); // set tmp to the serial value
@@ -227,37 +231,25 @@ void device_connected() {
     clearBuffer(); // Clear the buffer so that we don't get unwanted messages later on, must be here as the phone might be really fast and reply before we have finished telling it the pair status
     if (found >= TOTAL_DEVICES && firstempty >= TOTAL_DEVICES) {
       Serial.write(0xED); // All full, no room to pair
-      goto restart; // disconnect device
+      restart(); // disconnect device
     }
     Serial.write(found < TOTAL_DEVICES ? 0xFD : 0xCE); // Tell the phone whether it was found as existing device, or paired as new device
     found = found < TOTAL_DEVICES ? found : firstempty; // Set `found` to the position of the phone, even if it is a new pair
     Serial.write(found); // Tell the phone what its ID is
-    for (i = 0; i < 4; j++) { // For each byte of the phone's ID...
+    for (i = 0; i < 4; i++) { // For each byte of the phone's ID...
       EEPROM.write(found * 4 + i + 0xA, (uid >> i * 8) & 0xFF); // Save the byte, the reverse operation of above
     }
     state = DEVICE_CONNECTED_READY;
+    lastTime = millis(); // Set the last communication time
   } else if (millis() > lastTime + 10000) {
-    goto restart; // Timeout
+    restart(); // Timeout
   } else {
     Serial.write(0xE0); // hEllO; tell the phone we are ready to recv ID
   }
-  return;
-
-  restart: // Label, which allows us to simplify flow, althoug it is considered ugly
-  delay(200); // Wait a while, see the start() comments
-  Serial.print("+++"); // Enter AT mode
-  delay(700); // see start()
-  readChars(0, "Enter AT Mode", 1000); // see start()
-  Serial.println("AT+RESTART"); // Restart the AP
-  delay(10000); // Wait for restart to complete
-  Serial.println("Didn't get restarted!"); // Log error
-  state = START;
-  return;
 }
 
 void device_connected_ready() {
   if (Serial.available()) { // If we were sent a command...
-    lastTime = millis(); // Store when we were last communicated with
     int com = Serial.read(); // Read the command
     clearBuffer(); // Clear all pending commands, as we have a state machine and must be interacted with one-by-one
     byte cmd; // Command is stored here if it isn't corrupt
@@ -288,14 +280,8 @@ void device_connected_ready() {
       default:
         Serial.write(0xEE); // If command is not recognised, send an error message
     }
+    lastTime = millis(); // Store when we were last communicated with
   } else if (millis() > lastTime + 10000) { // If there was a timeout, restart the AP, as above
-    delay(200);
-    Serial.print("+++");
-    delay(700);
-    readChars(0, "Enter AT Mode", 1000);
-    Serial.println("AT+RESTART");
-    delay(10000);
-    Serial.println("Didn't get restarted!");
-    state = START;
+    restart();
   }
 }
