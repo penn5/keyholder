@@ -70,12 +70,14 @@ void restart() {
   Serial.println("AT+EXIT"); // Exit AT mode
   delay(10000); // Wait for us to die
   Serial.println("We weren't killed by the BLE chip, something bad happened");
-  while (1) { // error condition, flash forever
+  for (int i; i < 10; i++) { // error condition, flash for 10 seconds and retry
     digitalWrite(13, HIGH);
     delay(100);
     digitalWrite(13, LOW);
     delay(100);
   }
+  Serial.println("Restart failed.");
+  restart();
 }
 
 void loop() {
@@ -135,9 +137,9 @@ void waiting_at() {
   if (text.length()) {
     state = IN_AT;
   } else {
-    state = START; // It didn't enter AT mode, something weird happened.
     Serial.print("got text ");
     Serial.println(text);
+    restart(); // It didn't enter AT mode, something weird happened.
   }
 }
 
@@ -164,10 +166,9 @@ void in_at() {
 
 void at_pending_exit() {
   // It is trying to exit AT mode but not certainly done yet
-  String x = readChars(0, "OK", 100); // Wait for OK message to signal exit successful
+  String x = readChars(0, "OK", 1000); // Wait for OK message to signal exit successful
   if (!x.length()) {
-    state = START; // OK was not read, return to entrypoint
-    return;
+    restart(); // OK was not read, return to entrypoint
   }
   state = DEVICE_CONNECTED; // exited AT mode, now device can be communicated with
   delay(100); // Wait in case more data was sent
@@ -183,8 +184,7 @@ void waiting_connect() {
   if (rssi.charAt(0) != '-') { // If the RSSI starts with wrong character, we know it is some kind of error. Log it and restart
     Serial.print("rssi corrupt");
     Serial.println(rssi);
-    state = START;
-    return;
+    restart();
   }
   if (rssi == "-000") {
     return; // Still waiting for connection
