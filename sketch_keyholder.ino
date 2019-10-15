@@ -8,8 +8,6 @@ typedef enum {START, WAITING_AT, IN_AT, DEVICE_CONNECTED, DEVICE_CONNECTED_READY
 state_t state = START; // Default state is called START
 unsigned long lastTime; // Time when last serial message was received, it is used to make sure that each phone can connect for max 10 seconds
 
-volatile boolean didUserPressFactoryResetButton = false;
-
 void setup() {
   // Code here runs once only
   Serial.begin(115200); // Initialise connection with the Serial, for debug and for AT commands
@@ -23,12 +21,7 @@ void setup() {
   pinMode(A3, INPUT);
   pinMode(13, OUTPUT);
   digitalWrite(13, LOW);
-  attachInterrupt(digitalPinToInterrupt(2), triggerFacReset, FALLING); // Set an interrupt on digital pin 2, to detect when it is pushed, and trigger a factory reset
   Serial.println("AT+EXIT"); // Exit AT mode, in case we are in the wrong mode due to pressing RESET onboard PTM
-}
-
-void triggerFacReset() { // Interrupt, triggered when the user pushed PTM on D2
-  didUserPressFactoryResetButton = true; // Set a variable, so we can act on it next iteration of main loop
 }
 
 String readChars(unsigned int n, String expected, unsigned long timeout) { // This function is a utility function to read from serial, with optional expected value or timeout
@@ -60,6 +53,7 @@ void clearBuffer() { // Clean the read buffer, so that future calls to readChars
 
 void restart() {
   // This function never returns
+  digitalWrite(13, HIGH);
   Serial.println("AT+EXIT");
   delay(100);
   Serial.println("Restarting, goodbye!");
@@ -68,21 +62,37 @@ void restart() {
   delay(800);
   Serial.println("AT+RESTART"); // Request the Bluetooth controller to restart the AP (application processor)
   Serial.println("AT+EXIT"); // Exit AT mode
-  delay(10000); // Wait for us to die
-  Serial.println("We weren't killed by the BLE chip, something bad happened");
-  for (int i; i < 10; i++) { // error condition, flash for 10 seconds and retry
+  byte fail = 0;
+  while (fail < 10) {
+    delay(200); // We are waiting 300ms to make sure it's not spamming or heating up
+    clearBuffer();
+    Serial.println("AT+RSSI=?"); // Check the RSSI, its the signal strength. Always prefixed with a "-". 000 means not connected, any other 3 digit value means connected
+    String rssi = readChars(4, "", 100); // Read 4 unknown chars with 100ms timeout
+    if (rssi.charAt(0) != '-') { // If the RSSI starts with wrong character, we know it is some kind of error. Log it and restart
+      Serial.print("rssi corrupt");
+      Serial.println(rssi);
+      fail++;
+      continue;
+    }
+    if (rssi == "-000") {
+      break;
+    }
+  }
+  delay(1000);
+  for (int i = 0; i < 10; i++) { // error condition, flash for 10 seconds and retry
     digitalWrite(13, HIGH);
     delay(100);
     digitalWrite(13, LOW);
     delay(100);
   }
-  Serial.println("Restart failed.");
-  restart();
+  Serial.println("AT+EXIT"); // Exit AT mode
+  lastTime = millis(); // Reinitialise all global variables
+  state = START; // And prepare for restart
 }
 
 void loop() {
   // This function is called in a loop, forever as long as the chip is powered
-  if (didUserPressFactoryResetButton) {
+  if (digitalRead(2) == HIGH) {
     digitalWrite(13, HIGH); // Light up for debug purposes
     Serial.println("AT+EXIT"); // Exit AT mode in case we are in it
     delay(500);
@@ -91,7 +101,7 @@ void loop() {
       EEPROM.write(i, 0); // Clear that byte of EEPROM
     }
     Serial.println("EEPROM erased."); // Send debug message
-    restart();
+    return restart();
   }
   state_t laststate = state; // Save the current state so we can know if it has changed
   // The next section calls into the function based on which state we are in
@@ -139,7 +149,8 @@ void waiting_at() {
   } else {
     Serial.print("got text ");
     Serial.println(text);
-    restart(); // It didn't enter AT mode, something weird happened.
+    delay(10000);
+    return restart(); // It didn't enter AT mode, something weird happened.
   }
 }
 
@@ -168,7 +179,7 @@ void at_pending_exit() {
   // It is trying to exit AT mode but not certainly done yet
   String x = readChars(0, "OK", 1000); // Wait for OK message to signal exit successful
   if (!x.length()) {
-    restart(); // OK was not read, return to entrypoint
+    return restart(); // OK was not read, return to entrypoint
   }
   state = DEVICE_CONNECTED; // exited AT mode, now device can be communicated with
   delay(100); // Wait in case more data was sent
@@ -184,7 +195,7 @@ void waiting_connect() {
   if (rssi.charAt(0) != '-') { // If the RSSI starts with wrong character, we know it is some kind of error. Log it and restart
     Serial.print("rssi corrupt");
     Serial.println(rssi);
-    restart();
+    return restart();
   }
   if (rssi == "-000") {
     return; // Still waiting for connection
@@ -231,7 +242,7 @@ void device_connected() {
     clearBuffer(); // Clear the buffer so that we don't get unwanted messages later on, must be here as the phone might be really fast and reply before we have finished telling it the pair status
     if (found >= TOTAL_DEVICES && firstempty >= TOTAL_DEVICES) {
       Serial.write(0xED); // All full, no room to pair
-      restart(); // disconnect device
+      return restart(); // disconnect device
     }
     Serial.write(found < TOTAL_DEVICES ? 0xFD : 0xCE); // Tell the phone whether it was found as existing device, or paired as new device
     found = found < TOTAL_DEVICES ? found : firstempty; // Set `found` to the position of the phone, even if it is a new pair
@@ -242,7 +253,7 @@ void device_connected() {
     state = DEVICE_CONNECTED_READY;
     lastTime = millis(); // Set the last communication time
   } else if (millis() > lastTime + 10000) {
-    restart(); // Timeout
+    return restart(); // Timeout
   } else {
     Serial.write(0xE0); // hEllO; tell the phone we are ready to recv ID
   }
@@ -282,6 +293,6 @@ void device_connected_ready() {
     }
     lastTime = millis(); // Store when we were last communicated with
   } else if (millis() > lastTime + 10000) { // If there was a timeout, restart the AP, as above
-    restart();
+    return restart();
   }
 }
